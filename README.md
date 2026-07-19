@@ -2,6 +2,8 @@
 
 **New to this repo? Read [`PROJECT_STATUS.md`](PROJECT_STATUS.md) first** —
 full history, referenced papers, what's built, what's untested.
+**Ready to run it? [`RUNBOOK.md`](RUNBOOK.md)** has the exact command
+sequence, first-run to launch.
 
 Long-term tracker (short-term CSRT + ONNX ResNet-18 verifier + Kalman
 motion prior + batched redetector), packaged as a drop-in alternate
