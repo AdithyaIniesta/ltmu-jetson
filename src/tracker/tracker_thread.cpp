@@ -5,82 +5,91 @@
 #include <thread>
 
 #include "../common/globals.h"
-#include "../dual/tracker_state.h"
 #include "pending_init.h"
 
-TrackerResultState g_result;
+TrackerResultState g_resultL;
+TrackerResultState g_resultR;
+
+namespace {
+
+// One camera's tracking step: check for a pending init, run the tracker
+// if initialized, publish the result. Identical logic for L and R —
+// dual-lock means both run this every tick, independently.
+void stepCamera(LtmuTracker &ltmu, RingBuffer &ring, TrackerResultState &result,
+                PendingInit &pending, int cameraId, const char *label) {
+  cv::Mat frame;
+  int frameId;
+  if (!ring.latest(frame, frameId)) return;
+
+  {
+    std::lock_guard<std::mutex> lk(pending.mtx);
+    if (pending.resetRequested) {
+      result.initialized = false;
+      pending.resetRequested = false;
+      std::lock_guard<std::mutex> rlk(result.mtx);
+      result.haveFrame = false;
+      result.state = LtmuState::LOST;
+      printf("[TRACK-%s] reset\n", label);
+    }
+    if (pending.pending) {
+      ltmu.applyParams(g_params);
+      ltmu.init(frame, pending.bbox);
+      result.initialized = true;
+      pending.pending = false;
+      // A fresh CAPTURE on either camera clears the shared confirmation
+      // flag — same semantics as the single-tracker branch, since
+      // CONFIRM_TARGET is a tracker-wide operator assertion in this
+      // protocol (see docs/protocol.md), not per-camera.
+      g_target_confirmed.store(0);
+      printf("[TRACK-%s] init @ (%d,%d,%d,%d)\n", label, pending.bbox.x, pending.bbox.y,
+             pending.bbox.width, pending.bbox.height);
+    }
+  }
+
+  if (!result.initialized) return;
+
+  ltmu.applyParams(g_params);
+  // Only the primary camera's confirmation is meaningful for UART, but
+  // CONFIRM_TARGET is tracker-wide, so both engines see the same flag —
+  // a confirmed target on the primary also makes the secondary persist
+  // through LOST rather than give up, which is the useful behaviour
+  // during a handoff in progress.
+  ltmu.setConfirmed(g_target_confirmed.load() != 0);
+  LtmuResult res = ltmu.update(frame);
+
+  {
+    std::lock_guard<std::mutex> lk(result.mtx);
+    result.bbox = res.bbox;
+    result.frameW = frame.cols;
+    result.frameH = frame.rows;
+    result.state = res.state;
+    result.trackerScore = res.trackerScore;
+    result.verifierScore = res.verifierScore;
+    result.frameId = frameId;
+    result.haveFrame = true;
+  }
+
+  if (g_selected_camera.load() == cameraId) {
+    g_tracker_mode.store(res.state == LtmuState::TRACKING ? 1 : 2);
+    g_frameId.store(frameId);
+  }
+}
+
+}  // namespace
 
 void trackerThread(RingBuffer &leftRing, RingBuffer &rightRing, Embedder &embedder) {
-  LtmuTracker ltmu(embedder);
-  bool initialized = false;
-  int lastSelected = 0;
-  cv::Size lastFrameSize;
+  LtmuTracker ltmuL(embedder);
+  LtmuTracker ltmuR(embedder);
 
-  printf(LOG_CYAN "[TRACK]" LOG_RESET " thread started (embedder: %s)\n",
+  printf(LOG_CYAN "[TRACK]" LOG_RESET " thread started, dual-lock (embedder: %s)\n",
          embedder.usingCuda() ? "CUDA" : "CPU");
 
   while (g_running.load()) {
-    int selected = g_selected_camera.load();
+    stepCamera(ltmuL, leftRing, g_resultL, g_pendingInitL, 1, "L");
+    stepCamera(ltmuR, rightRing, g_resultR, g_pendingInitR, 2, "R");
 
-    if (selected == 0) {
-      // Not locked to a camera yet — idle, low CPU.
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
-      continue;
-    }
-
-    if (selected != lastSelected) {
-      // Camera changed (fresh CAPTURE or HANDOFF+re-CAPTURE) — the next
-      // CAPTURE command will call ltmu.init() via g_pendingInit below.
-      initialized = false;
-      lastSelected = selected;
-    }
-
-    RingBuffer &ring = (selected == 1) ? leftRing : rightRing;
-    cv::Mat frame;
-    int frameId;
-    if (!ring.latest(frame, frameId)) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      continue;
-    }
-    lastFrameSize = frame.size();
-
-    // Pending-init handshake with the control thread: a CAPTURE command
-    // stashes a bbox here; the tracker thread performs the actual
-    // (possibly slow, first-frame) init on its own thread so the UDP
-    // control thread never blocks on tracker work.
-    {
-      std::lock_guard<std::mutex> lk(g_pendingInitMtx);
-      if (g_pendingInit) {
-        ltmu.applyParams(g_params);
-        ltmu.init(frame, g_pendingInitBbox);
-        initialized = true;
-        g_pendingInit = false;
-        g_target_confirmed.store(0);
-      }
-    }
-
-    if (!initialized) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      continue;
-    }
-
-    ltmu.applyParams(g_params);
-    ltmu.setConfirmed(g_target_confirmed.load() != 0);
-    LtmuResult res = ltmu.update(frame);
-
-    {
-      std::lock_guard<std::mutex> lk(g_result.mtx);
-      g_result.bbox = res.bbox;
-      g_result.frameW = frame.cols;
-      g_result.frameH = frame.rows;
-      g_result.state = res.state;
-      g_result.trackerScore = res.trackerScore;
-      g_result.verifierScore = res.verifierScore;
-      g_result.frameId = frameId;
-      g_result.haveFrame = true;
-    }
-    g_tracker_mode.store(res.state == LtmuState::TRACKING ? 1 : 2);
-    g_frameId.store(frameId);
+    if (!g_resultL.initialized && !g_resultR.initialized)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   printf("[TRACK] thread exiting\n");
 }

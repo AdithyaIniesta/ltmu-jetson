@@ -70,6 +70,40 @@ Ids 16-23 are LTMU-specific — add this profile to the ground station's
 | HANDOFF | unlock camera selection, tracker cleared |
 | SET_CAMERA_PARAM | V4L2 ioctl on the target camera device (econ-cameras branch only; no-op on uav-dataset) |
 | CONFIRM_TARGET | freezes the frame-0 anchor embedding as authoritative; redetector keeps running through LOST indefinitely rather than accepting a plausible substitute |
+| HANDOFF_MANUAL(source_cam, u, v) | **geometric handoff.** Projects pixel (u, v) from the source camera into the destination camera via a plane-induced homography (see below) and directly CAPTUREs the destination tracker there — no blind re-click. `u<0 or v<0` falls back to the source camera's current tracker rect centre. Source tracker keeps running (dual-lock). |
+
+## Dual-lock (both cameras track simultaneously)
+
+Unlike the original repo's exclusive camera lock, `g_selected_camera` here
+is only the **primary** pointer (drives UART, since the gimbal has one
+physical setpoint). CAPTURE always dispatches to the sending camera's own
+tracker regardless of lock state — both cameras may be TRACKING at once,
+and both S1/S2 telemetry panels show live, independent state. RESET and
+HANDOFF affect only the sending camera's own tracker, never the peer.
+
+## Geometric handoff (plane-induced homography)
+
+`src/handoff/handoff.h` computes a 3×3 homography from stereo calibration
+(`K_L`, `K_R`, `R`, `t_mm`) plus an assumed target-plane depth:
+
+```
+H_L2R = K_R · (R − (t·nᵀ)/d) · K_L⁻¹        n = [0, 0, 1]ᵀ (LEFT optical axis)
+H_R2L = H_L2R⁻¹
+```
+
+`d` (`g_target_depth_mm`, argv[14]) is the distance from the boresight
+camera's optical origin to the target plane along its forward axis —
+fixed/measured indoors, or barometer AGL on the airframe (update via
+`HandoffModel::setDepth()` per frame if available; not yet wired to a
+live barometer feed in this port).
+
+Calibration is loaded once at boot from `stereo_calib_{W}x{H}.json`
+(falls back to `stereo_calib.json`), same resolution-specific lookup as
+the original repo — a mismatched-resolution file is never rescaled, it
+must be recalibrated at the tracker's operating resolution. See
+`config/*.sample.json` for the expected shape (`K_L`, `K_R`, `dist_L`,
+`dist_R`, `R`, `t_mm`, `img_size`) — replace with your rig's actual
+stereo calibration before relying on `CMD_HANDOFF_MANUAL`.
 
 ## Telemetry field mapping
 
