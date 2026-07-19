@@ -93,6 +93,15 @@ Full geometry writeup: `docs/protocol.md`.
 
 ## Run — uav-dataset branch
 
+Interactive, Enter-through-defaults launcher (recommended — includes
+the motion-model prompt):
+
+```bash
+./run_jp5.sh
+```
+
+Or run the binary directly:
+
 ```bash
 ./build/bin/LtmuTracker \
   192.168.0.20 \
@@ -103,14 +112,17 @@ Full geometry writeup: `docs/protocol.md`.
   models/resnet18_embedder.onnx \
   ""            `# uart dev, empty = disabled` \
   ""            `# recording base path, empty = disabled` \
-  2000          `# target plane depth in mm, 0 disables HANDOFF_MANUAL`
+  2000          `# target plane depth in mm, 0 disables HANDOFF_MANUAL` \
+  ctrv          `# motion model: cv | ca | ctrv | imm — see docs/protocol.md`
 ```
 
 Left and right ring buffers are fed from two independent sequence
 folders (pass the same folder twice to mirror one camera onto both
 streams). Point the ground station GUI at the Orin's IP with the
 matching ports — CAPTURE/RESET/HANDOFF/HANDOFF_MANUAL/CONFIRM all work
-exactly as they do against the original repo's binary.
+exactly as they do against the original repo's binary. Motion model is
+a boot-time choice only (see `docs/protocol.md`) — the GUI is
+unmodified and has no control over it.
 
 ## Run — econ-cameras branch
 
@@ -118,6 +130,18 @@ exactly as they do against the original repo's binary.
 git checkout econ-cameras
 cmake -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
+```
+
+Interactive, Enter-through-defaults launcher (recommended — includes
+the motion-model prompt):
+
+```bash
+./run_jp5.sh
+```
+
+Or run the binary directly:
+
+```bash
 ./build/bin/LtmuTracker \
   192.168.0.20 5000 5001 5002 5003 1280 720 30 \
   /dev/video0 /dev/video1 \
@@ -125,8 +149,12 @@ cmake --build build -j$(nproc)
   /dev/ttyTHS0 \
   /data/recordings/session1 \
   UYVY          `# pixel format: UYVY | YUYV | MJPG` \
-  2000          `# target plane depth in mm, 0 disables HANDOFF_MANUAL`
+  2000          `# target plane depth in mm, 0 disables HANDOFF_MANUAL` \
+  ctrv          `# motion model: cv | ca | ctrv | imm — see docs/protocol.md`
 ```
+
+Motion model is a boot-time choice only (see `docs/protocol.md`) — the
+GUI is unmodified and has no control over it.
 
 ## Ground station GUI
 

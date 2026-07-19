@@ -77,12 +77,13 @@ void stepCamera(LtmuTracker &ltmu, RingBuffer &ring, TrackerResultState &result,
 
 }  // namespace
 
-void trackerThread(RingBuffer &leftRing, RingBuffer &rightRing, Embedder &embedder) {
-  LtmuTracker ltmuL(embedder);
-  LtmuTracker ltmuR(embedder);
+void trackerThread(RingBuffer &leftRing, RingBuffer &rightRing, Embedder &embedder,
+                   MotionModel motionModel) {
+  LtmuTracker ltmuL(embedder, motionModel);
+  LtmuTracker ltmuR(embedder, motionModel);
 
-  printf(LOG_CYAN "[TRACK]" LOG_RESET " thread started, dual-lock (embedder: %s)\n",
-         embedder.usingCuda() ? "CUDA" : "CPU");
+  printf(LOG_CYAN "[TRACK]" LOG_RESET " thread started, dual-lock (embedder: %s, motion model: %s)\n",
+         embedder.usingCuda() ? "CUDA" : "CPU", motionModelName(motionModel));
 
   while (g_running.load()) {
     stepCamera(ltmuL, leftRing, g_resultL, g_pendingInitL, 1, "L");

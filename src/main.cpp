@@ -100,11 +100,14 @@ int main(int argc, char *argv[]) {
   //  [15] targetDepthMm (optional, 0/omitted disables geometric handoff —
   //       distance in mm from the boresight camera's optical origin to
   //       the target plane; indoor: measured, airframe: barometer AGL)
+  //  [16] motionModel (optional, default "cv" — "cv"|"ca"|"ctrv"|"imm";
+  //       see src/tracker/motion.h for why no single fixed model is
+  //       right for every target — set once at boot, not GUI-switchable)
   if (argc < 12) {
     fprintf(stderr,
             "usage: %s clientIp leftVideoPort leftCtrlPort rightVideoPort "
             "rightCtrlPort W H fps leftDev rightDev onnxModelPath "
-            "[uartDev] [recBasePath] [pixelFormat] [targetDepthMm]\n",
+            "[uartDev] [recBasePath] [pixelFormat] [targetDepthMm] [motionModel]\n",
             argv[0]);
     return 1;
   }
@@ -124,6 +127,7 @@ int main(int argc, char *argv[]) {
   bool recEnabled = !recBasePath.empty();
   std::string pixelFormat = (argc > 14) ? argv[14] : "UYVY";
   g_target_depth_mm = (argc > 15) ? static_cast<float>(atof(argv[15])) : 0.0f;
+  MotionModel motionModel = motionModelFromString((argc > 16) ? argv[16] : "cv");
 
   CONFIG_FILE = "ltmu_params_econ_cameras.cfg";
   loadParams();
@@ -145,6 +149,7 @@ int main(int argc, char *argv[]) {
   printf("  target depth  : %s\n",
          g_target_depth_mm > 0.0f ? (std::to_string(g_target_depth_mm) + " mm").c_str()
                                   : "(geometric handoff disabled)");
+  printf("  motion model  : %s\n", motionModelName(motionModel));
 
   Embedder embedder(onnxPath, /*preferCuda=*/true);
 
@@ -187,7 +192,8 @@ int main(int argc, char *argv[]) {
 
   std::thread capL(econCaptureThread, leftCfg, std::ref(leftRing), "L");
   std::thread capR(econCaptureThread, rightCfg, std::ref(rightRing), "R");
-  std::thread trk(trackerThread, std::ref(leftRing), std::ref(rightRing), std::ref(embedder));
+  std::thread trk(trackerThread, std::ref(leftRing), std::ref(rightRing), std::ref(embedder),
+                  motionModel);
   std::thread ctrlL(controlThread, g_leftCtrlPort, 1, leftDev.c_str());
   std::thread ctrlR(controlThread, g_rightCtrlPort, 2, rightDev.c_str());
   std::thread telem(telemetryThread, g_fps);
