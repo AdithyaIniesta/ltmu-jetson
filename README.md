@@ -64,6 +64,20 @@ python3 scripts/export_onnx.py --out models/resnet18_embedder.onnx
 ```bash
 sudo apt install libopencv-dev libgstreamer1.0-dev libgstreamer-app1.0-dev \
                  libgstreamer-plugins-base1.0-dev
+./build.sh
+```
+
+`build.sh` auto-detects the Jetson board (Orin NX / Xavier NX) from the
+device tree, wipes `build/` for a fully clean configure+build every
+time (a stale `CMakeCache.txt` after any flag change is a classic
+silent-wrong-binary trap), and grants `cap_sys_nice` on the resulting
+binary so the capture/tracker/streaming threads can request real-time
+scheduling without running the whole process as root. Override
+defaults with env vars: `ONNXRUNTIME_ROOT=/path BUILD_TYPE=Debug
+./build.sh`.
+
+Equivalent raw commands, if you'd rather not use the script:
+```bash
 cmake -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
@@ -128,8 +142,7 @@ unmodified and has no control over it.
 
 ```bash
 git checkout econ-cameras
-cmake -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+./build.sh
 ./build/bin/LtmuTracker \
   192.168.0.20 5000 5001 5002 5003 1280 720 30 \
   /dev/video0 /dev/video1 \
