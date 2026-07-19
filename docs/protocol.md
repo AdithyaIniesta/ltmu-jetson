@@ -105,6 +105,30 @@ must be recalibrated at the tracker's operating resolution. See
 `dist_R`, `R`, `t_mm`, `img_size`) — replace with your rig's actual
 stereo calibration before relying on `CMD_HANDOFF_MANUAL`.
 
+## Motion model (CV / CA / CTRV / IMM)
+
+The redetector's Kalman position prior (`src/tracker/motion.h`) is
+selectable at boot via `run_jp5.sh`, not the GUI. Empirical basis (see
+`ltmu-tracker/scripts/compare_motion_models.py` and
+`compare_motion_models_freefall.py`, run against synthetic ground truth):
+
+| model | RMSE, prediction-only, orbiting target | RMSE, prediction-only, free-falling target |
+|---|---|---|
+| CV | 130.0 px | 8.0 px |
+| CA | 132.7 px | **0.0 px** |
+| CTRV | **1.4 px** | 11.1 px |
+| IMM | blends toward whichever fits | blends toward whichever fits |
+
+No fixed model wins both — CA is exact for free fall (gravity is
+constant acceleration), CTRV is near-exact for turning/loitering
+targets, and each is markedly worse than CV on the other's scenario.
+IMM runs all three per frame and weights the blended position estimate
+by which one currently predicts real measurements best.
+
+This is intentionally **not** exposed as a `SET_PARAM` id — it's fixed
+for the tracker's lifetime once chosen at launch, so the ground station
+GUI needs zero changes to work with any of the four.
+
 ## Telemetry field mapping
 
 `det_prob` and `dnn_similarity` both carry the verifier's cosine score

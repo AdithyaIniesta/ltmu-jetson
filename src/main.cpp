@@ -99,11 +99,14 @@ int main(int argc, char *argv[]) {
   //  [14] targetDepthMm (optional, 0/omitted disables geometric handoff —
   //       distance in mm from the boresight camera's optical origin to
   //       the target plane; indoor: measured, airframe: barometer AGL)
+  //  [15] motionModel (optional, default "cv" — "cv"|"ca"|"ctrv"|"imm";
+  //       see src/tracker/motion.h for why no single fixed model is
+  //       right for every target — set once at boot, not GUI-switchable)
   if (argc < 12) {
     fprintf(stderr,
             "usage: %s clientIp leftVideoPort leftCtrlPort rightVideoPort "
             "rightCtrlPort W H fps leftSeqDir rightSeqDir onnxModelPath "
-            "[uartDev] [recBasePath] [targetDepthMm]\n",
+            "[uartDev] [recBasePath] [targetDepthMm] [motionModel]\n",
             argv[0]);
     return 1;
   }
@@ -122,6 +125,7 @@ int main(int argc, char *argv[]) {
   std::string recBasePath = (argc > 13) ? argv[13] : "";
   bool recEnabled = !recBasePath.empty();
   g_target_depth_mm = (argc > 14) ? static_cast<float>(atof(argv[14])) : 0.0f;
+  MotionModel motionModel = motionModelFromString((argc > 15) ? argv[15] : "cv");
 
   CONFIG_FILE = "ltmu_params_uav_dataset.cfg";
   loadParams();
@@ -142,6 +146,7 @@ int main(int argc, char *argv[]) {
   printf("  target depth  : %s\n",
          g_target_depth_mm > 0.0f ? (std::to_string(g_target_depth_mm) + " mm").c_str()
                                   : "(geometric handoff disabled)");
+  printf("  motion model  : %s\n", motionModelName(motionModel));
 
   Embedder embedder(onnxPath, /*preferCuda=*/true);
 
@@ -184,7 +189,8 @@ int main(int argc, char *argv[]) {
 
   std::thread capL(datasetCaptureThread, leftCfg, std::ref(leftRing), "L");
   std::thread capR(datasetCaptureThread, rightCfg, std::ref(rightRing), "R");
-  std::thread trk(trackerThread, std::ref(leftRing), std::ref(rightRing), std::ref(embedder));
+  std::thread trk(trackerThread, std::ref(leftRing), std::ref(rightRing), std::ref(embedder),
+                  motionModel);
   std::thread ctrlL(controlThread, g_leftCtrlPort, 1, "");
   std::thread ctrlR(controlThread, g_rightCtrlPort, 2, "");
   std::thread telem(telemetryThread, g_fps);

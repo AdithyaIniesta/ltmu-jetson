@@ -39,4 +39,5 @@ inline TrackerResultState &resultFor(int cameraId) {
   return cameraId == 2 ? g_resultR : g_resultL;
 }
 
-void trackerThread(RingBuffer &leftRing, RingBuffer &rightRing, Embedder &embedder);
+void trackerThread(RingBuffer &leftRing, RingBuffer &rightRing, Embedder &embedder,
+                   MotionModel motionModel = MotionModel::CV);

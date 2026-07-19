@@ -40,8 +40,11 @@ struct LtmuResult {
 
 class LtmuTracker {
 public:
-  explicit LtmuTracker(Embedder &embedder)
-      : embedder_(embedder), verifier_(embedder), redetector_(embedder, verifier_, motion_) {}
+  // motionModel is fixed for the lifetime of this tracker — set once at
+  // boot from run_jp5.sh, not a live-switchable parameter (see motion.h).
+  explicit LtmuTracker(Embedder &embedder, MotionModel motionModel = MotionModel::CV)
+      : embedder_(embedder), verifier_(embedder), motion_(motionModel),
+        redetector_(embedder, verifier_, motion_) {}
 
   void applyParams(const ParamStore &p) {
     verifier_.setThresholds(p.get(LtmuParam::VERIFIER_LOST_THRESH),
