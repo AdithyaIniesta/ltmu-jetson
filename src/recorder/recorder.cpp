@@ -41,29 +41,38 @@ void Recorder::stop() {
   active_ = false;
 }
 
+// Dual-lock: both cameras record independently from boot (matches the
+// original repo's "dual annotated MKVs" behaviour) rather than only
+// whichever camera happens to be primary — a handoff mid-flight must
+// not create a gap in either camera's recording.
 void recorderThread(RingBuffer &leftRing, RingBuffer &rightRing, const std::string &basePath,
                     bool enabled, int width, int height, int fps) {
   if (!enabled) return;
-  Recorder rec;
-  if (!rec.start(basePath, width, height, fps)) return;
+  Recorder recL, recR;
+  bool okL = recL.start(basePath + "/left", width, height, fps);
+  bool okR = recR.start(basePath + "/right", width, height, fps);
+  if (!okL && !okR) return;
 
   const auto period = std::chrono::microseconds(1000000 / std::max(1, fps));
-  int lastFrameId = -1;
+  int lastFrameIdL = -1, lastFrameIdR = -1;
 
   while (g_running.load()) {
     auto t0 = std::chrono::steady_clock::now();
-    int selected = g_selected_camera.load();
-    RingBuffer &ring = (selected == 2) ? rightRing : leftRing;
-    cv::Mat frame;
-    int fid;
-    if (ring.latest(frame, fid) && fid != lastFrameId) {
-      lastFrameId = fid;
-      rec.writeFrame(frame);
+    cv::Mat left, right;
+    int fidL, fidR;
+    if (okL && leftRing.latest(left, fidL) && fidL != lastFrameIdL) {
+      lastFrameIdL = fidL;
+      recL.writeFrame(left);
+    }
+    if (okR && rightRing.latest(right, fidR) && fidR != lastFrameIdR) {
+      lastFrameIdR = fidR;
+      recR.writeFrame(right);
     }
     auto elapsed = std::chrono::steady_clock::now() - t0;
     auto sleepFor = period - std::chrono::duration_cast<std::chrono::microseconds>(elapsed);
     if (sleepFor.count() > 0) std::this_thread::sleep_for(sleepFor);
   }
-  rec.stop();
+  recL.stop();
+  recR.stop();
   printf("[REC] thread exiting\n");
 }

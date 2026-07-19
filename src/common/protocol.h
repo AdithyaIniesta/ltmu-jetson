@@ -115,6 +115,13 @@ enum CmdType : uint32_t {
   CMD_SET_CAMERA_PARAM = 8,
   CMD_GET_PARAMS = 9,
   CMD_CONFIRM_TARGET = 10,
+  // arg1 = source camera id (1=L, 2=R), arg2/arg3 = source pixel (u, v);
+  // negative u/v means "use that camera's current tracker rect centre".
+  // Computes the destination-camera pixel via the plane-induced
+  // homography (see src/handoff/handoff.h) and CAPTUREs the destination
+  // tracker there — an operator-triggered but geometry-computed handoff,
+  // as opposed to CMD_HANDOFF's blind unlock+re-click.
+  CMD_HANDOFF_MANUAL = 11,
 };
 
 // Confirmation flag echoed in TelemetryPacket::reserved bit 8.

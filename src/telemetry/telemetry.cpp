@@ -77,32 +77,60 @@ void uartSendAngle(int fd, int mode, float angleX, float angleY, float detProb,
   }
 }
 
-void sendTelemetry(int frameId, int frameW, int frameH, float angleX, float angleY,
-                   int pixOffX, int pixOffY) {
-  int cam = g_selected_camera.load();
-  int sock = (cam == 2) ? g_telemSockR : g_telemSockL;
-  if (sock < 0) return;
+namespace {
 
-  cv::Rect bbox; float vscore = 0.0f; LtmuState state = LtmuState::LOST;
+// Computes pixel-offset-from-center and a placeholder-FOV angle for one
+// camera's current result. Real deployments should replace kHfovDeg/
+// kVfovDeg with the lens's actual FOV (see original repo's HFOV_ECON/
+// VFOV_ECON constants).
+AngleReportPod computeReport(TrackerResultState &result) {
+  AngleReportPod r{};
   {
-    std::lock_guard<std::mutex> lk(g_result.mtx);
-    bbox = g_result.bbox;
-    vscore = g_result.verifierScore;
-    state = g_result.state;
+    std::lock_guard<std::mutex> lk(result.mtx);
+    r.bbox = result.bbox;
+    r.state = result.state;
+    r.vscore = result.verifierScore;
+    r.frameId = result.frameId;
+    r.fw = result.frameW;
+    r.fh = result.frameH;
   }
+  if (r.fw > 0 && r.fh > 0) {
+    float cx = r.bbox.x + r.bbox.width / 2.0f;
+    float cy = r.bbox.y + r.bbox.height / 2.0f;
+    r.pixOffX = cx - r.fw / 2.0f;
+    r.pixOffY = cy - r.fh / 2.0f;
+    constexpr float kHfovDeg = 90.0f, kVfovDeg = 60.0f;
+    r.angleX = (r.pixOffX / r.fw) * kHfovDeg;
+    r.angleY = (r.pixOffY / r.fh) * kVfovDeg;
+  }
+  return r;
+}
+
+}  // namespace
+
+// Dual-lock: each camera sends its OWN live telemetry to its OWN GUI
+// port — S1/S2 panels both show real tracking state simultaneously,
+// not just whichever camera is "primary".
+void sendTelemetry(int cameraId, const AngleReportPod &r) {
+  int sock = (cameraId == 2) ? g_telemSockR : g_telemSockL;
+  if (sock < 0) return;
+  bool valid = (cameraId == 2) ? g_gsAddrValidR : g_gsAddrValidL;
+  if (!valid) return;
+  const sockaddr_in &dest = (cameraId == 2) ? g_gsAddrR : g_gsAddrL;
 
   TelemetryPacket t{};
   t.magic = TELEMETRY_MAGIC;
-  t.frame_id = static_cast<uint32_t>(frameId);
-  t.mode = static_cast<uint32_t>(state == LtmuState::TRACKING ? 1 : 2);
-  t.det_prob = vscore;
+  t.frame_id = static_cast<uint32_t>(r.frameId);
+  t.mode = static_cast<uint32_t>(r.state == LtmuState::TRACKING ? 1 : 2);
+  t.det_prob = r.vscore;
   t.proc_time_us = 0;
-  t.rect_x = bbox.x; t.rect_y = bbox.y;
-  t.rect_width = bbox.width; t.rect_height = bbox.height;
-  t.object_x = bbox.x; t.object_y = bbox.y;
-  t.object_width = bbox.width; t.object_height = bbox.height;
-  t.angle_x_deg = angleX; t.angle_y_deg = angleY;
-  t.pixel_offset_x = pixOffX; t.pixel_offset_y = pixOffY;
+  t.rect_x = r.bbox.x; t.rect_y = r.bbox.y;
+  t.rect_width = r.bbox.width; t.rect_height = r.bbox.height;
+  t.object_x = r.bbox.x; t.object_y = r.bbox.y;
+  t.object_width = r.bbox.width; t.object_height = r.bbox.height;
+  t.angle_x_deg = r.angleX; t.angle_y_deg = r.angleY;
+  t.pixel_offset_x = static_cast<int32_t>(r.pixOffX);
+  t.pixel_offset_y = static_cast<int32_t>(r.pixOffY);
   t.search_win_width = static_cast<int32_t>(g_params.get(LtmuParam::SEARCH_WINDOW_WIDTH));
   t.search_win_height = static_cast<int32_t>(g_params.get(LtmuParam::SEARCH_WINDOW_HEIGHT));
   t.lost_mode_option = g_params.get(LtmuParam::LOST_MODE_OPTION);
@@ -121,15 +149,12 @@ void sendTelemetry(int frameId, int frameW, int frameH, float angleX, float angl
   t.dnn_verify_interval = static_cast<int32_t>(g_params.get(LtmuParam::REDETECT_INTERVAL));
   t.dnn_veto_threshold = g_params.get(LtmuParam::VERIFIER_LOST_THRESH);
   t.dnn_accept_threshold = g_params.get(LtmuParam::VERIFIER_UPDATE_THRESH);
-  t.dnn_similarity = vscore;
-  t.frame_width = frameW;
-  t.frame_height = frameH;
+  t.dnn_similarity = r.vscore;
+  t.frame_width = r.fw;
+  t.frame_height = r.fh;
   t.reserved = ENGINE_TAG | ENGINE_LTMU;
   if (g_target_confirmed.load()) t.reserved |= CONFIRM_TELEM_BIT;
 
-  const sockaddr_in &dest = (cam == 2) ? g_gsAddrR : g_gsAddrL;
-  bool valid = (cam == 2) ? g_gsAddrValidR : g_gsAddrValidL;
-  if (!valid) return;
   sendto(sock, &t, sizeof(t), 0, reinterpret_cast<const sockaddr *>(&dest), sizeof(dest));
 }
 
@@ -141,34 +166,21 @@ void telemetryThread(int fps) {
            uartFd >= 0 ? "opened" : "FAILED to open");
 
   while (g_running.load()) {
-    cv::Rect bbox; float vscore = 0.0f; LtmuState state = LtmuState::LOST;
-    int frameId = 0, fw = 0, fh = 0;
-    {
-      std::lock_guard<std::mutex> lk(g_result.mtx);
-      bbox = g_result.bbox; vscore = g_result.verifierScore; state = g_result.state;
-      frameId = g_result.frameId; fw = g_result.frameW; fh = g_result.frameH;
-    }
+    AngleReportPod rL = computeReport(g_resultL);
+    AngleReportPod rR = computeReport(g_resultR);
 
-    float pixOffX = 0, pixOffY = 0, angleX = 0, angleY = 0;
-    if (fw > 0 && fh > 0) {
-      float cx = bbox.x + bbox.width / 2.0f;
-      float cy = bbox.y + bbox.height / 2.0f;
-      pixOffX = cx - fw / 2.0f;
-      pixOffY = cy - fh / 2.0f;
-      // Simple linear pixel->degree mapping using a placeholder HFOV/VFOV;
-      // replace with the real lens FOV constants when known (see the
-      // original repo's HFOV_ECON/VFOV_ECON pattern in common/globals.h).
-      constexpr float kHfovDeg = 90.0f, kVfovDeg = 60.0f;
-      angleX = (pixOffX / fw) * kHfovDeg;
-      angleY = (pixOffY / fh) * kVfovDeg;
-    }
+    sendTelemetry(1, rL);
+    sendTelemetry(2, rR);
 
-    sendTelemetry(frameId, fw, fh, angleX, angleY, static_cast<int>(pixOffX),
-                 static_cast<int>(pixOffY));
-
-    int mode = state == LtmuState::TRACKING ? 1 : 2;
-    uartSendAngle(uartFd, mode, angleX, angleY, vscore, static_cast<int>(pixOffX),
-                 static_cast<int>(pixOffY), g_target_confirmed.load());
+    // UART is a single physical link — only the primary camera's angle
+    // is sent, matching the gimbal's single active setpoint.
+    int primary = g_selected_camera.load();
+    const AngleReportPod &pr = (primary == 2) ? rR : rL;
+    int mode = pr.state == LtmuState::TRACKING ? 1 : 2;
+    if (primary != 0)
+      uartSendAngle(uartFd, mode, pr.angleX, pr.angleY, pr.vscore,
+                   static_cast<int>(pr.pixOffX), static_cast<int>(pr.pixOffY),
+                   g_target_confirmed.load());
 
     std::this_thread::sleep_for(period);
   }

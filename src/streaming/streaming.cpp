@@ -87,12 +87,16 @@ void streamingShutdown() {
   }
 }
 
-static void drawOverlay(cv::Mat &frame) {
+// Dual-lock: draws whichever camera's own live tracker result is
+// current — no gate on primary/selected, since both cameras may be
+// TRACKING independently and the operator watches both video panels.
+static void drawOverlay(cv::Mat &frame, int cameraId) {
+  TrackerResultState &result = resultFor(cameraId);
   cv::Rect bbox; LtmuState state; float vscore;
   {
-    std::lock_guard<std::mutex> lk(g_result.mtx);
-    if (!g_result.haveFrame) return;
-    bbox = g_result.bbox; state = g_result.state; vscore = g_result.verifierScore;
+    std::lock_guard<std::mutex> lk(result.mtx);
+    if (!result.haveFrame) return;
+    bbox = result.bbox; state = result.state; vscore = result.verifierScore;
   }
   cv::Scalar color = (state == LtmuState::TRACKING) ? cv::Scalar(0, 220, 0) : cv::Scalar(0, 200, 255);
   cv::rectangle(frame, bbox, color, 2);
@@ -100,9 +104,17 @@ static void drawOverlay(cv::Mat &frame) {
   snprintf(label, sizeof(label), "%s %.2f", state == LtmuState::TRACKING ? "TRACK" : "LOST", vscore);
   cv::putText(frame, label, cv::Point(bbox.x, std::max(0, bbox.y - 6)), cv::FONT_HERSHEY_SIMPLEX,
              0.5, color, 2);
-  if (g_target_confirmed.load())
+  if (g_target_confirmed.load() && g_selected_camera.load() == cameraId)
     cv::putText(frame, "CONFIRMED", cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.6,
                cv::Scalar(0, 220, 0), 2);
+
+  // g_last_rect_x/y is the CMD_HANDOFF_MANUAL source-pixel fallback —
+  // only meaningful for the PRIMARY camera (matches the original repo's
+  // single pair of atomics tied to whichever camera is primary).
+  if (g_selected_camera.load() == cameraId && state == LtmuState::TRACKING) {
+    g_last_rect_x.store(bbox.x + bbox.width / 2, std::memory_order_relaxed);
+    g_last_rect_y.store(bbox.y + bbox.height / 2, std::memory_order_relaxed);
+  }
 }
 
 void outputThread(RingBuffer &leftRing, RingBuffer &rightRing, int width, int height, int fps,
@@ -138,19 +150,20 @@ void outputThread(RingBuffer &leftRing, RingBuffer &rightRing, int width, int he
 
   while (g_running.load()) {
     auto t0 = std::chrono::steady_clock::now();
-    int selected = g_selected_camera.load();
 
     cv::Mat left, right;
     int fid;
     bool haveLeft = leftRing.latest(left, fid);
     bool haveRight = rightRing.latest(right, fid);
 
+    // Dual-lock: both cameras' overlays are drawn from their own live
+    // tracker result every frame, independent of which is primary.
     if (haveLeft) {
-      if (selected == 1) drawOverlay(left);
+      drawOverlay(left, 1);
       streamingPushFrame(left);
     }
     if (streamingRight && haveRight && appsrcR) {
-      if (selected == 2) drawOverlay(right);
+      drawOverlay(right, 2);
       cv::Mat resized;
       const cv::Mat *src = &right;
       if (right.cols != width || right.rows != height) {

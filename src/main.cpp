@@ -3,22 +3,32 @@
 //
 // Thread topology mirrors jetson-tracking-perception/src/main.cpp:
 //
-//   captureThread(L) ─┐            ┌─→ outputThread   → RTP H.264 → UDP
-//   captureThread(R) ─┤ ring bufs  ├─→ recorderThread → optional MP4
-//   trackerThread    ─┤            │
-//   controlThread(L) ─┤ UDP CAPTURE/RESET/PARAM/HANDOFF/CONFIRM
+//   captureThread(L) ─┐            ┌─→ outputThread   → RTP H.264 → UDP (both cams)
+//   captureThread(R) ─┤ ring bufs  ├─→ recorderThread → optional MP4 (both cams)
+//   trackerThread    ─┤            │   (dual-lock: L and R tracked independently)
+//   controlThread(L) ─┤ UDP CAPTURE/RESET/PARAM/HANDOFF/HANDOFF_MANUAL/CONFIRM
 //   controlThread(R) ─┤
-//   telemetryThread  ─┘ UDP telemetry + UART angle
+//   telemetryThread  ─┘ UDP telemetry (both cams) + UART angle (primary only)
+//
+// Dual-lock: both cameras may CAPTURE and track simultaneously; there is
+// no exclusive gate. g_selected_camera is the UART "primary" pointer
+// only. CMD_HANDOFF_MANUAL adds geometric handoff on top — a stereo
+// calibration + assumed target-plane depth (src/handoff/) lets the
+// destination-camera pixel be computed automatically instead of the
+// operator hunting for the target by eye. See docs/protocol.md.
 //
 // uav-dataset branch: capture reads paced image sequences instead of
 // live V4L2 cameras — see src/capture/capture.cpp. Every other module
-// (control, telemetry, streaming, recorder, tracker) is identical to
-// the econ-cameras branch, which is the point: this branch proves the
-// full pipeline against ground truth before hardware is involved.
+// (control, telemetry, streaming, recorder, tracker, handoff) is
+// identical to the econ-cameras branch, which is the point: this
+// branch proves the full pipeline against ground truth before hardware
+// is involved.
 // ============================================================
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <sys/stat.h>
 
 #include <csignal>
 #include <cstdio>
@@ -30,6 +40,7 @@
 #include "common/globals.h"
 #include "control/control.h"
 #include "dual/ring_buffer.h"
+#include "handoff/handoff.h"
 #include "recorder/recorder.h"
 #include "streaming/streaming.h"
 #include "telemetry/telemetry.h"
@@ -56,6 +67,10 @@ int g_tracker_W = 1280, g_tracker_H = 720, g_fps = 30;
 std::string g_uartDev;
 int g_uartFd = -1;
 std::string CONFIG_FILE = "ltmu_params.cfg";
+handoff::HandoffModel g_handoff;
+float g_target_depth_mm = 0.0f;
+std::atomic<int32_t> g_last_rect_x{0};
+std::atomic<int32_t> g_last_rect_y{0};
 
 static void sigHandler(int) {
   static std::atomic<int> hits{0};
@@ -81,11 +96,14 @@ int main(int argc, char *argv[]) {
   //  [11] onnxModelPath
   //  [12] uartDev (optional, "" to disable)
   //  [13] recBasePath (optional, "" to disable recording)
+  //  [14] targetDepthMm (optional, 0/omitted disables geometric handoff —
+  //       distance in mm from the boresight camera's optical origin to
+  //       the target plane; indoor: measured, airframe: barometer AGL)
   if (argc < 12) {
     fprintf(stderr,
             "usage: %s clientIp leftVideoPort leftCtrlPort rightVideoPort "
             "rightCtrlPort W H fps leftSeqDir rightSeqDir onnxModelPath "
-            "[uartDev] [recBasePath]\n",
+            "[uartDev] [recBasePath] [targetDepthMm]\n",
             argv[0]);
     return 1;
   }
@@ -103,6 +121,7 @@ int main(int argc, char *argv[]) {
   g_uartDev = (argc > 12) ? argv[12] : "";
   std::string recBasePath = (argc > 13) ? argv[13] : "";
   bool recEnabled = !recBasePath.empty();
+  g_target_depth_mm = (argc > 14) ? static_cast<float>(atof(argv[14])) : 0.0f;
 
   CONFIG_FILE = "ltmu_params_uav_dataset.cfg";
   loadParams();
@@ -120,8 +139,38 @@ int main(int argc, char *argv[]) {
   printf("  onnx model    : %s\n", onnxPath.c_str());
   printf("  uart          : %s\n", g_uartDev.empty() ? "(disabled)" : g_uartDev.c_str());
   printf("  recording     : %s\n", recEnabled ? recBasePath.c_str() : "(disabled)");
+  printf("  target depth  : %s\n",
+         g_target_depth_mm > 0.0f ? (std::to_string(g_target_depth_mm) + " mm").c_str()
+                                  : "(geometric handoff disabled)");
 
   Embedder embedder(onnxPath, /*preferCuda=*/true);
+
+  // ── Geometric handoff ────────────────────────────────────────
+  // Resolution-specific calibration preferred (stereo_calib_WxH.json),
+  // falls back to stereo_calib.json — same lookup as the original repo.
+  // No K-scaling: a mismatched-resolution calibration would produce
+  // wrong seeds, so recalibrate at the tracker's operating resolution
+  // instead of scaling on the fly.
+  if (g_target_depth_mm > 0.0f) {
+    char sizedPath[64];
+    snprintf(sizedPath, sizeof(sizedPath), "stereo_calib_%dx%d.json", g_tracker_W, g_tracker_H);
+    struct stat st;
+    bool sizedExists = stat(sizedPath, &st) == 0;
+    const char *calibPath = sizedExists ? sizedPath : "stereo_calib.json";
+    printf("[HANDOFF] %s calibration: %s\n", sizedExists ? "using resolution-specific" : "using",
+           calibPath);
+
+    handoff::StereoCalib calib{};
+    if (handoff::loadStereoCalib(calibPath, calib)) {
+      if (!g_handoff.initialise(calib, g_target_depth_mm))
+        fprintf(stderr, "[HANDOFF] initialise() failed — CMD_HANDOFF_MANUAL disabled\n");
+    } else {
+      fprintf(stderr, "[HANDOFF] %s not loaded — CMD_HANDOFF_MANUAL disabled\n", calibPath);
+    }
+  } else {
+    printf("[HANDOFF] target depth not provided — CMD_HANDOFF_MANUAL disabled "
+           "(CMD_HANDOFF still works)\n");
+  }
 
   // Ground-station-facing sockets for telemetry (control.cpp opens its own
   // per-port sockets for ACKs; these are separate send-only sockets).

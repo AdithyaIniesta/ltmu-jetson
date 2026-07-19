@@ -73,6 +73,24 @@ cmake --build build -j$(nproc)
 if `TrackerCSRT` is missing, build OpenCV with `-DOPENCV_EXTRA_MODULES_PATH`
 pointed at opencv_contrib.
 
+## Dual-lock + geometric handoff
+
+Both cameras can track independently and simultaneously — CAPTURE on
+either camera starts/updates that camera's own tracker; there is no
+exclusive lock. `g_selected_camera` is only the **primary** pointer that
+drives UART (the gimbal has one physical setpoint). Both S1/S2 GUI
+panels show live, independent tracking state at all times.
+
+`CMD_HANDOFF_MANUAL` adds *geometric* handoff on top of this: given a
+stereo calibration and an assumed target-plane depth, the tracker
+computes the destination-camera pixel automatically (via a plane-induced
+homography) and re-locks there — no blind re-click needed, and the
+source camera keeps tracking. Pass a target depth (mm) as argv[14] and
+drop a `stereo_calib_{W}x{H}.json` (or `stereo_calib.json`) — see
+`config/*.sample.json` for the shape — to enable it; omit both to run
+with `CMD_HANDOFF_MANUAL` disabled (plain `CMD_HANDOFF` still works).
+Full geometry writeup: `docs/protocol.md`.
+
 ## Run — uav-dataset branch
 
 ```bash
@@ -84,14 +102,15 @@ pointed at opencv_contrib.
   /data/UAV123/data_seq/UAV123/person1 \
   models/resnet18_embedder.onnx \
   ""            `# uart dev, empty = disabled` \
-  ""            `# recording base path, empty = disabled`
+  ""            `# recording base path, empty = disabled` \
+  2000          `# target plane depth in mm, 0 disables HANDOFF_MANUAL`
 ```
 
 Left and right ring buffers are fed from two independent sequence
 folders (pass the same folder twice to mirror one camera onto both
 streams). Point the ground station GUI at the Orin's IP with the
-matching ports — CAPTURE/RESET/HANDOFF/CONFIRM all work exactly as they
-do against the original repo's binary.
+matching ports — CAPTURE/RESET/HANDOFF/HANDOFF_MANUAL/CONFIRM all work
+exactly as they do against the original repo's binary.
 
 ## Run — econ-cameras branch
 
@@ -104,7 +123,9 @@ cmake --build build -j$(nproc)
   /dev/video0 /dev/video1 \
   models/resnet18_embedder.onnx \
   /dev/ttyTHS0 \
-  /data/recordings/session1
+  /data/recordings/session1 \
+  UYVY          `# pixel format: UYVY | YUYV | MJPG` \
+  2000          `# target plane depth in mm, 0 disables HANDOFF_MANUAL`
 ```
 
 ## Ground station GUI

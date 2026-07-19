@@ -11,8 +11,8 @@
 #include <opencv2/core.hpp>
 
 #include "../common/globals.h"
-#include "../dual/tracker_state.h"
 #include "../tracker/pending_init.h"
+#include "../tracker/tracker_thread.h"
 
 #ifdef LTMU_ECON_CAMERAS
 #include <fcntl.h>
@@ -163,34 +163,47 @@ void controlThread(int port, int camera_id, const char *device_path) {
 
     switch (pkt.type) {
       case CMD_CAPTURE: {
-        int expected = 0;
+        // Dual-lock: CAPTURE always dispatches to the sending camera's
+        // own tracker — no exclusive gate. g_selected_camera tracks the
+        // "primary" (UART routing) only: first-ever CAPTURE claims it,
+        // a secondary-camera CAPTURE switches primary to that camera
+        // without disturbing the other camera's independent track.
         int locked = g_selected_camera.load();
-        bool sameCam = locked == camera_id;
-        if (g_selected_camera.compare_exchange_strong(expected, camera_id) || sameCam) {
-          float w = g_params.get(LtmuParam::RECT_WIDTH);
-          float h = g_params.get(LtmuParam::RECT_HEIGHT);
-          cv::Rect bbox(static_cast<int>(pkt.arg1 - w / 2), static_cast<int>(pkt.arg2 - h / 2),
-                        static_cast<int>(w), static_cast<int>(h));
-          {
-            std::lock_guard<std::mutex> lk(g_pendingInitMtx);
-            g_pendingInitBbox = bbox;
-            g_pendingInit = true;
-          }
-          g_target_confirmed.store(0);
-          printf(LOG_YELLOW "[CTRL-%s]" LOG_RESET " CAPTURE @ (%.0f, %.0f)\n",
-                 camera_id == 1 ? "L" : "R", pkt.arg1, pkt.arg2);
-        } else {
-          printf("[CTRL-%s] ignored — camera locked to %s\n", camera_id == 1 ? "L" : "R",
-                 locked == 1 ? "LEFT" : "RIGHT");
+        if (locked != 0 && locked != camera_id) {
+          printf(LOG_CYAN "[CTRL-%s]" LOG_RESET
+                 " secondary-camera CAPTURE — switching primary %s -> %s\n",
+                 camera_id == 1 ? "L" : "R", locked == 1 ? "LEFT" : "RIGHT",
+                 camera_id == 1 ? "LEFT" : "RIGHT");
         }
+        g_selected_camera.store(camera_id);
+
+        float w = g_params.get(LtmuParam::RECT_WIDTH);
+        float h = g_params.get(LtmuParam::RECT_HEIGHT);
+        cv::Rect bbox(static_cast<int>(pkt.arg1 - w / 2), static_cast<int>(pkt.arg2 - h / 2),
+                      static_cast<int>(w), static_cast<int>(h));
+        PendingInit &pend = pendingInitFor(camera_id);
+        {
+          std::lock_guard<std::mutex> lk(pend.mtx);
+          pend.bbox = bbox;
+          pend.pending = true;
+        }
+        g_target_confirmed.store(0);
+        printf(LOG_YELLOW "[CTRL-%s]" LOG_RESET " CAPTURE @ (%.0f, %.0f)\n",
+               camera_id == 1 ? "L" : "R", pkt.arg1, pkt.arg2);
         break;
       }
       case CMD_RESET: {
-        int locked = g_selected_camera.load();
-        if (locked == 0 || locked == camera_id) {
-          deactivate_all_cameras();
-          printf(LOG_YELLOW "[CTRL-%s]" LOG_RESET " RESET\n", camera_id == 1 ? "L" : "R");
+        // Dual-lock: RESET only the sender's own tracker; the peer keeps
+        // tracking if it has an independent lock.
+        PendingInit &pend = pendingInitFor(camera_id);
+        {
+          std::lock_guard<std::mutex> lk(pend.mtx);
+          pend.resetRequested = true;
+          pend.pending = false;
         }
+        if (g_selected_camera.load() == camera_id) g_selected_camera.store(0);
+        g_target_confirmed.store(0);
+        printf(LOG_YELLOW "[CTRL-%s]" LOG_RESET " RESET\n", camera_id == 1 ? "L" : "R");
         break;
       }
       case CMD_CHANGE_SIZE: {
@@ -244,11 +257,87 @@ void controlThread(int port, int camera_id, const char *device_path) {
         sendAck(camera_id, pkt.type, simpleId, static_cast<float>(value), ok);
         break;
       }
-      case CMD_HANDOFF:
+      case CMD_HANDOFF: {
+        // Blind handoff: unlock primary, reset only the SENDER's own
+        // tracker. The peer camera (if independently locked) keeps
+        // tracking — dual-lock, no forced reset of both.
         printf(LOG_YELLOW "[CTRL-%s]" LOG_RESET " HANDOFF\n", camera_id == 1 ? "L" : "R");
-        deactivate_all_cameras();
+        g_selected_camera.store(0);
+        g_handoff_requested.store(true);
+        PendingInit &pend = pendingInitFor(camera_id);
+        {
+          std::lock_guard<std::mutex> lk(pend.mtx);
+          pend.resetRequested = true;
+          pend.pending = false;
+        }
+        g_target_confirmed.store(0);
         sendAck(camera_id, pkt.type, 0, 0, true);
         break;
+      }
+      case CMD_HANDOFF_MANUAL: {
+        // Geometric handoff: compute the destination-camera pixel via
+        // the plane-induced homography and CAPTURE the destination
+        // tracker there directly — no blind re-click needed. Source
+        // tracker is left running (dual-lock).
+        const int sourceCam = static_cast<int>(pkt.arg1);
+        if (!g_handoff.ready()) {
+          printf(LOG_RED "[HANDOFF]" LOG_RESET
+                 " model not initialised — rejected. Check stereo_calib.json + target depth.\n");
+          sendAck(camera_id, pkt.type, 0, 0, false);
+          break;
+        }
+        if (sourceCam != 1 && sourceCam != 2) {
+          printf(LOG_RED "[HANDOFF]" LOG_RESET " invalid source camera id %d\n", sourceCam);
+          sendAck(camera_id, pkt.type, 0, 0, false);
+          break;
+        }
+
+        double srcU = pkt.arg2, srcV = pkt.arg3;
+        if (srcU < 0.0 || srcV < 0.0) {
+          // Fall back to the source camera's own current tracker rect
+          // centre (dual-lock: each camera has its own live result now,
+          // not just the primary's — see tracker_thread.h resultFor()).
+          TrackerResultState &srcResult = resultFor(sourceCam);
+          std::lock_guard<std::mutex> lk(srcResult.mtx);
+          if (!srcResult.haveFrame || srcResult.state != LtmuState::TRACKING) {
+            printf(LOG_RED "[HANDOFF]" LOG_RESET
+                   " source cam %d has no live track and no explicit pixel supplied\n", sourceCam);
+            sendAck(camera_id, pkt.type, 0, 0, false);
+            break;
+          }
+          srcU = srcResult.bbox.x + srcResult.bbox.width / 2.0;
+          srcV = srcResult.bbox.y + srcResult.bbox.height / 2.0;
+        }
+
+        double dstU = 0.0, dstV = 0.0;
+        bool ok = (sourceCam == 1) ? g_handoff.projectLtoR(srcU, srcV, dstU, dstV)
+                                    : g_handoff.projectRtoL(srcU, srcV, dstU, dstV);
+        if (!ok) {
+          printf(LOG_RED "[HANDOFF]" LOG_RESET " projection failed (behind camera / bad geometry)\n");
+          sendAck(camera_id, pkt.type, 0, 0, false);
+          break;
+        }
+
+        const int dstCam = (sourceCam == 1) ? 2 : 1;
+        printf(LOG_CYAN "[HANDOFF]" LOG_RESET " %s (%.1f, %.1f) -> %s (%.1f, %.1f)  depth=%.1fmm\n",
+               sourceCam == 1 ? "LEFT" : "RIGHT", srcU, srcV, dstCam == 1 ? "LEFT" : "RIGHT",
+               dstU, dstV, g_handoff.planeDepthMm());
+
+        float w = g_params.get(LtmuParam::RECT_WIDTH);
+        float h = g_params.get(LtmuParam::RECT_HEIGHT);
+        cv::Rect dstBbox(static_cast<int>(dstU - w / 2), static_cast<int>(dstV - h / 2),
+                         static_cast<int>(w), static_cast<int>(h));
+        PendingInit &dstPend = pendingInitFor(dstCam);
+        {
+          std::lock_guard<std::mutex> lk(dstPend.mtx);
+          dstPend.bbox = dstBbox;
+          dstPend.pending = true;
+        }
+        g_selected_camera.store(dstCam);  // primary follows operator intent
+        g_target_confirmed.store(0);
+        sendAck(camera_id, pkt.type, static_cast<unsigned int>(dstCam), static_cast<float>(dstU), true);
+        break;
+      }
       case CMD_CONFIRM_TARGET: {
         int confirmed = pkt.arg1 != 0.0f ? 1 : 0;
         g_target_confirmed.store(confirmed);

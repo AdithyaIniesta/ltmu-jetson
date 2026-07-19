@@ -17,6 +17,7 @@
 
 #include "params.h"
 #include "protocol.h"
+#include "../handoff/handoff.h"
 
 // ── ANSI log helpers ─────────────────────────────────────────
 #define LOG_RESET "\033[0m"
@@ -33,13 +34,34 @@
 // ── Process lifetime ─────────────────────────────────────────
 extern std::atomic<bool> g_running;
 
-// ── Camera selection / handoff (mirrors dual/tracker_state) ───
+// ── Camera selection / handoff ──────────────────────────────────
+// Dual-lock: BOTH cameras may track simultaneously. g_selected_camera is
+// the "primary" — which camera's result drives UART (single physical
+// gimbal link) — not an exclusive gate on who may CAPTURE/track.
 // 0 = NONE, 1 = LEFT, 2 = RIGHT
 extern std::atomic<int> g_selected_camera;
 extern std::atomic<bool> g_handoff_requested;
 extern std::atomic<int> g_target_confirmed;
-extern std::atomic<int> g_tracker_mode;  // 0 FREE / 1 TRACKING / 2 LOST
+extern std::atomic<int> g_tracker_mode;  // 0 FREE / 1 TRACKING / 2 LOST (primary camera)
 extern std::atomic<int> g_frameId;
+
+// ── Geometric handoff (see src/handoff/handoff.h) ──────────────
+// Plane-induced homography seeded from stereo_calib_{W}x{H}.json (or
+// stereo_calib.json) + a constant target-plane depth. CMD_HANDOFF_MANUAL
+// uses this to compute the destination-camera pixel automatically
+// instead of the operator hunting for the target by eye on the peer
+// camera. g_handoff.ready() is false (and CMD_HANDOFF_MANUAL rejected)
+// until a calibration loads successfully at boot.
+extern handoff::HandoffModel g_handoff;
+extern float g_target_depth_mm;
+// Primary camera's current tracker rect centre, updated every output
+// frame by streaming.cpp. Informational only — CMD_HANDOFF_MANUAL's
+// pixel fallback reads each camera's own live TrackerResultState
+// directly (see control.cpp), which works for either source camera,
+// not just the primary; kept here for parity with the original repo's
+// naming and as a cheap "where is the primary target" query point.
+extern std::atomic<int32_t> g_last_rect_x;
+extern std::atomic<int32_t> g_last_rect_y;
 
 // ── Parameter store (ids 1-23, see params.h) ───────────────────
 extern ParamStore g_params;
