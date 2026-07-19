@@ -1,0 +1,10 @@
+build/
+*.o
+*.cfg
+weights/*
+models/*.onnx
+!models/.gitkeep
+data/
+recordings/
+__pycache__/
+.vscode/
