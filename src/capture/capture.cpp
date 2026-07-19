@@ -1,60 +1,82 @@
 #include "capture.h"
 
-#include <algorithm>
-#include <chrono>
+#include <gst/app/gstappsink.h>
+#include <gst/gst.h>
+
 #include <cstdio>
-#include <filesystem>
+#include <cstring>
 #include <opencv2/opencv.hpp>
-#include <thread>
-#include <vector>
 
 #include "../common/globals.h"
 
-namespace fs = std::filesystem;
+namespace {
 
-static std::vector<std::string> listFrames(const std::string &dir) {
-  std::vector<std::string> files;
-  if (!fs::is_directory(dir)) return files;
-  for (const auto &entry : fs::directory_iterator(dir)) {
-    if (!entry.is_regular_file()) continue;
-    auto ext = entry.path().extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp")
-      files.push_back(entry.path().string());
+// Builds a v4l2src pipeline for one e-Con camera. UYVY/YUYV come off the
+// sensor raw and are converted in software; MJPG is hardware-decoded via
+// jpegdec (cheaper on CPU, preferred if the camera supports it at the
+// target resolution/fps).
+std::string buildPipelineDesc(const CameraConfig &cfg) {
+  char buf[1024];
+  if (cfg.pixelFormat == "MJPG") {
+    snprintf(buf, sizeof(buf),
+             "v4l2src device=%s ! image/jpeg,width=%d,height=%d,framerate=%d/1 ! "
+             "jpegdec ! videoconvert ! video/x-raw,format=BGR ! "
+             "appsink name=sink emit-signals=false sync=false max-buffers=2 drop=true",
+             cfg.videoDevicePath.c_str(), cfg.captureWidth, cfg.captureHeight, cfg.fps);
+  } else {
+    snprintf(buf, sizeof(buf),
+             "v4l2src device=%s ! video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1 ! "
+             "videoconvert ! video/x-raw,format=BGR ! "
+             "appsink name=sink emit-signals=false sync=false max-buffers=2 drop=true",
+             cfg.videoDevicePath.c_str(), cfg.pixelFormat.c_str(), cfg.captureWidth,
+             cfg.captureHeight, cfg.fps);
   }
-  std::sort(files.begin(), files.end());
-  return files;
+  return buf;
 }
 
-void datasetCaptureThread(const DatasetCaptureConfig &cfg, RingBuffer &ring,
-                          const char *label) {
-  std::vector<std::string> frames = listFrames(cfg.sequenceDir);
-  if (frames.empty()) {
-    fprintf(stderr, "[CAP-%s] no frames found under %s\n", label,
-            cfg.sequenceDir.c_str());
+}  // namespace
+
+void econCaptureThread(const CameraConfig &cfg, RingBuffer &ring, const char *label) {
+  static bool gstInited = false;
+  if (!gstInited) { gst_init(nullptr, nullptr); gstInited = true; }
+
+  std::string desc = buildPipelineDesc(cfg);
+  printf(LOG_CYAN "[CAP-%s]" LOG_RESET " %s\n", label, desc.c_str());
+
+  GError *err = nullptr;
+  GstElement *pipeline = gst_parse_launch(desc.c_str(), &err);
+  if (!pipeline) {
+    fprintf(stderr, "[CAP-%s] pipeline failed: %s\n", label, err ? err->message : "?");
+    if (err) g_error_free(err);
     return;
   }
-  printf(LOG_CYAN "[CAP-%s]" LOG_RESET " %zu frames from %s @ %d fps%s\n", label,
-         frames.size(), cfg.sequenceDir.c_str(), cfg.fps, cfg.loop ? " (loop)" : "");
+  GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+  gst_element_set_state(pipeline, GST_STATE_PLAYING);
 
-  const auto period = std::chrono::microseconds(1000000 / std::max(1, cfg.fps));
   int frameId = 0;
-  size_t idx = 0;
-
   while (g_running.load()) {
-    auto t0 = std::chrono::steady_clock::now();
-    cv::Mat img = cv::imread(frames[idx]);
-    if (!img.empty()) {
-      ring.push(img, frameId++);
+    GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 200 * GST_MSECOND);
+    if (!sample) continue;
+
+    GstCaps *caps = gst_sample_get_caps(sample);
+    GstStructure *s = gst_caps_get_structure(caps, 0);
+    int w = 0, h = 0;
+    gst_structure_get_int(s, "width", &w);
+    gst_structure_get_int(s, "height", &h);
+
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    GstMapInfo map;
+    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+      if (w > 0 && h > 0 && map.size >= static_cast<gsize>(w) * h * 3) {
+        cv::Mat frame(h, w, CV_8UC3, map.data);
+        ring.push(frame, frameId++);  // push() clones, safe once we unmap below
+      }
+      gst_buffer_unmap(buffer, &map);
     }
-    idx++;
-    if (idx >= frames.size()) {
-      if (!cfg.loop) break;
-      idx = 0;
-    }
-    auto elapsed = std::chrono::steady_clock::now() - t0;
-    auto sleepFor = period - std::chrono::duration_cast<std::chrono::microseconds>(elapsed);
-    if (sleepFor.count() > 0) std::this_thread::sleep_for(sleepFor);
+    gst_sample_unref(sample);
   }
+
+  gst_element_set_state(pipeline, GST_STATE_NULL);
+  gst_object_unref(pipeline);
   printf("[CAP-%s] thread exiting\n", label);
 }

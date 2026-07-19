@@ -19,6 +19,14 @@ set_target_properties(${EXE_NAME} PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+# ── econ-cameras branch: real V4L2 ioctls (SET_CAMERA_PARAM) and the
+#    Jetson hardware H.264 encoder instead of the uav-dataset branch's
+#    software x264enc default. ─────────────────────────────────────────
+target_compile_definitions(${EXE_NAME} PRIVATE
+  LTMU_ECON_CAMERAS
+  LTMU_ENCODER_ELEMENT="nvv4l2h264enc maxperf-enable=1 insert-sps-pps=1 bitrate=8000000"
+)
+
 target_include_directories(${EXE_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

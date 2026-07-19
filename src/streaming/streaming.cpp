@@ -18,6 +18,15 @@
 #define LTMU_ENCODER_ELEMENT "x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000"
 #endif
 
+// nvv4l2h264enc (Jetson hardware encoder) wants its input in NVMM memory;
+// nvvidconv upload+convert does that. x264enc (software, uav-dataset
+// branch) works directly on system-memory I420, so this is a no-op there.
+#ifdef LTMU_ECON_CAMERAS
+#define LTMU_ENCODER_PRECONV "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+#else
+#define LTMU_ENCODER_PRECONV ""
+#endif
+
 namespace {
 GstElement *g_pipeline = nullptr;
 GstElement *g_appsrc = nullptr;
@@ -36,9 +45,9 @@ bool streamingInit(const std::string &host, int port, int width, int height, int
            "appsrc name=src is-live=true block=true format=time "
            "caps=video/x-raw,format=BGR,width=%d,height=%d,framerate=%d/1 ! "
            "videoconvert ! video/x-raw,format=I420 ! "
-           "%s ! h264parse config-interval=1 ! rtph264pay pt=96 config-interval=1 ! "
+           "%s%s ! h264parse config-interval=1 ! rtph264pay pt=96 config-interval=1 ! "
            "udpsink host=%s port=%d sync=false async=false",
-           width, height, fps, LTMU_ENCODER_ELEMENT, host.c_str(), port);
+           width, height, fps, LTMU_ENCODER_PRECONV, LTMU_ENCODER_ELEMENT, host.c_str(), port);
 
   GError *err = nullptr;
   g_pipeline = gst_parse_launch(pipelineDesc, &err);
@@ -118,10 +127,11 @@ void outputThread(RingBuffer &leftRing, RingBuffer &rightRing, int width, int he
     snprintf(desc, sizeof(desc),
              "appsrc name=srcR is-live=true block=true format=time "
              "caps=video/x-raw,format=BGR,width=%d,height=%d,framerate=%d/1 ! "
-             "videoconvert ! video/x-raw,format=I420 ! %s ! "
+             "videoconvert ! video/x-raw,format=I420 ! %s%s ! "
              "h264parse config-interval=1 ! rtph264pay pt=96 config-interval=1 ! "
              "udpsink host=%s port=%d sync=false async=false",
-             width, height, fps, LTMU_ENCODER_ELEMENT, clientIp.c_str(), rightVideoPort);
+             width, height, fps, LTMU_ENCODER_PRECONV, LTMU_ENCODER_ELEMENT, clientIp.c_str(),
+             rightVideoPort);
     GError *err = nullptr;
     pipeR = gst_parse_launch(desc, &err);
     if (pipeR) {

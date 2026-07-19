@@ -1,15 +1,12 @@
 // ============================================================
-// capture.h — uav-dataset branch: paced image-sequence capture.
+// capture.h — econ-cameras branch: real dual V4L2 GStreamer capture.
 //
-// Reads a UAV123-style folder of numbered JPGs (e.g.
-// data_seq/UAV123/bike1/000001.jpg ...) and pushes frames into a
-// RingBuffer at a fixed rate, so the rest of the pipeline (tracker,
-// control, telemetry, streaming) behaves exactly as it would against a
-// live camera. Two independent sequence paths simulate left/right
-// cameras for dual-camera flow validation without real hardware.
-//
-// The econ-cameras branch replaces this file with real V4L2/GStreamer
-// dual capture; every other module is unchanged between branches.
+// Builds a v4l2src ! ... ! appsink pipeline per camera and pushes
+// decoded BGR frames into a RingBuffer, mirroring
+// jetson-tracking-perception's dual_capture.cpp / pipeline.cpp
+// CameraConfig pattern. The uav-dataset branch replaces this file with
+// a paced image-sequence reader; every other module is unchanged
+// between branches.
 // ============================================================
 #pragma once
 
@@ -17,13 +14,14 @@
 
 #include "../dual/ring_buffer.h"
 
-struct DatasetCaptureConfig {
-  std::string sequenceDir;   // folder of 000001.jpg, 000002.jpg, ...
+struct CameraConfig {
+  std::string videoDevicePath;   // e.g. "/dev/video0"
+  std::string pixelFormat = "UYVY";  // "UYVY", "YUYV", or "MJPG"
+  int captureWidth = 1280;
+  int captureHeight = 720;
   int fps = 30;
-  bool loop = true;
 };
 
-// Runs until g_running is false. Pushes frames into `ring` at
-// cfg.fps, looping the sequence if cfg.loop is set.
-void datasetCaptureThread(const DatasetCaptureConfig &cfg, RingBuffer &ring,
-                          const char *label);
+// Runs until g_running is false. Builds and drives the GStreamer
+// pipeline for one camera, pushing frames into `ring`.
+void econCaptureThread(const CameraConfig &cfg, RingBuffer &ring, const char *label);

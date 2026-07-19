@@ -1,5 +1,5 @@
 // ============================================================
-// main.cpp — LTMU tracker entry point (uav-dataset branch).
+// main.cpp — LTMU tracker entry point (econ-cameras branch).
 //
 // Thread topology mirrors jetson-tracking-perception/src/main.cpp:
 //
@@ -10,11 +10,12 @@
 //   controlThread(R) ─┤
 //   telemetryThread  ─┘ UDP telemetry + UART angle
 //
-// uav-dataset branch: capture reads paced image sequences instead of
-// live V4L2 cameras — see src/capture/capture.cpp. Every other module
-// (control, telemetry, streaming, recorder, tracker) is identical to
-// the econ-cameras branch, which is the point: this branch proves the
-// full pipeline against ground truth before hardware is involved.
+// econ-cameras branch: capture reads real dual e-Con V4L2 cameras via
+// GStreamer (src/capture/capture.cpp), and CMD_SET_CAMERA_PARAM ioctls
+// go to the actual device. Every other module (control, telemetry,
+// streaming, recorder, tracker) is byte-for-byte the same code as the
+// uav-dataset branch — that's the point: the pipeline was proven there
+// first, only the capture layer changes for real hardware.
 // ============================================================
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -73,19 +74,20 @@ static int openTelemSocket(int &sockOut) {
 }
 
 int main(int argc, char *argv[]) {
-  // argv layout (uav-dataset branch):
+  // argv layout (econ-cameras branch):
   //  [1] clientIp
   //  [2] leftVideoPort  [3] leftCtrlPort  [4] rightVideoPort [5] rightCtrlPort
   //  [6] W [7] H [8] fps
-  //  [9] leftSequenceDir  [10] rightSequenceDir (may repeat [9] to simulate dual)
+  //  [9] leftDev  [10] rightDev   (e.g. /dev/video0 /dev/video1)
   //  [11] onnxModelPath
   //  [12] uartDev (optional, "" to disable)
   //  [13] recBasePath (optional, "" to disable recording)
+  //  [14] pixelFormat (optional, default UYVY — "UYVY"|"YUYV"|"MJPG")
   if (argc < 12) {
     fprintf(stderr,
             "usage: %s clientIp leftVideoPort leftCtrlPort rightVideoPort "
-            "rightCtrlPort W H fps leftSeqDir rightSeqDir onnxModelPath "
-            "[uartDev] [recBasePath]\n",
+            "rightCtrlPort W H fps leftDev rightDev onnxModelPath "
+            "[uartDev] [recBasePath] [pixelFormat]\n",
             argv[0]);
     return 1;
   }
@@ -97,47 +99,47 @@ int main(int argc, char *argv[]) {
   g_tracker_W = atoi(argv[6]);
   g_tracker_H = atoi(argv[7]);
   g_fps = atoi(argv[8]);
-  std::string leftSeqDir = argv[9];
-  std::string rightSeqDir = argv[10];
+  std::string leftDev = argv[9];
+  std::string rightDev = argv[10];
   std::string onnxPath = argv[11];
   g_uartDev = (argc > 12) ? argv[12] : "";
   std::string recBasePath = (argc > 13) ? argv[13] : "";
   bool recEnabled = !recBasePath.empty();
+  std::string pixelFormat = (argc > 14) ? argv[14] : "UYVY";
 
-  CONFIG_FILE = "ltmu_params_uav_dataset.cfg";
+  CONFIG_FILE = "ltmu_params_econ_cameras.cfg";
   loadParams();
 
   signal(SIGINT, sigHandler);
   signal(SIGTERM, sigHandler);
 
-  printf(LOG_GREEN "[MAIN]" LOG_RESET " LTMU tracker (uav-dataset branch)\n");
+  printf(LOG_GREEN "[MAIN]" LOG_RESET " LTMU tracker (econ-cameras branch)\n");
   printf("  client        : %s\n", g_clientIp.c_str());
   printf("  video ports   : L=%d R=%d\n", g_leftVideoPort, g_rightVideoPort);
   printf("  ctrl ports    : L=%d R=%d\n", g_leftCtrlPort, g_rightCtrlPort);
-  printf("  resolution    : %dx%d @ %d fps\n", g_tracker_W, g_tracker_H, g_fps);
-  printf("  left seq      : %s\n", leftSeqDir.c_str());
-  printf("  right seq     : %s\n", rightSeqDir.c_str());
+  printf("  resolution    : %dx%d @ %d fps (%s)\n", g_tracker_W, g_tracker_H, g_fps,
+         pixelFormat.c_str());
+  printf("  left device   : %s\n", leftDev.c_str());
+  printf("  right device  : %s\n", rightDev.c_str());
   printf("  onnx model    : %s\n", onnxPath.c_str());
   printf("  uart          : %s\n", g_uartDev.empty() ? "(disabled)" : g_uartDev.c_str());
   printf("  recording     : %s\n", recEnabled ? recBasePath.c_str() : "(disabled)");
 
   Embedder embedder(onnxPath, /*preferCuda=*/true);
 
-  // Ground-station-facing sockets for telemetry (control.cpp opens its own
-  // per-port sockets for ACKs; these are separate send-only sockets).
   openTelemSocket(g_telemSockL);
   openTelemSocket(g_telemSockR);
 
   RingBuffer leftRing, rightRing;
 
-  DatasetCaptureConfig leftCfg{leftSeqDir, g_fps, /*loop=*/true};
-  DatasetCaptureConfig rightCfg{rightSeqDir, g_fps, /*loop=*/true};
+  CameraConfig leftCfg{leftDev, pixelFormat, g_tracker_W, g_tracker_H, g_fps};
+  CameraConfig rightCfg{rightDev, pixelFormat, g_tracker_W, g_tracker_H, g_fps};
 
-  std::thread capL(datasetCaptureThread, leftCfg, std::ref(leftRing), "L");
-  std::thread capR(datasetCaptureThread, rightCfg, std::ref(rightRing), "R");
+  std::thread capL(econCaptureThread, leftCfg, std::ref(leftRing), "L");
+  std::thread capR(econCaptureThread, rightCfg, std::ref(rightRing), "R");
   std::thread trk(trackerThread, std::ref(leftRing), std::ref(rightRing), std::ref(embedder));
-  std::thread ctrlL(controlThread, g_leftCtrlPort, 1, "");
-  std::thread ctrlR(controlThread, g_rightCtrlPort, 2, "");
+  std::thread ctrlL(controlThread, g_leftCtrlPort, 1, leftDev.c_str());
+  std::thread ctrlR(controlThread, g_rightCtrlPort, 2, rightDev.c_str());
   std::thread telem(telemetryThread, g_fps);
   std::thread out(outputThread, std::ref(leftRing), std::ref(rightRing), g_tracker_W,
                   g_tracker_H, g_fps, g_clientIp, g_leftVideoPort, g_rightVideoPort);
