@@ -22,14 +22,14 @@ namespace {
 GstElement *g_pipeline = nullptr;
 GstElement *g_appsrc = nullptr;
 guint64 g_frameCount = 0;
-int g_w = 0, g_h = 0, g_fps = 30;
+int g_w = 0, g_h = 0, g_streamFps = 30;
 }  // namespace
 
 bool streamingInit(const std::string &host, int port, int width, int height, int fps) {
   static bool gstInited = false;
   if (!gstInited) { gst_init(nullptr, nullptr); gstInited = true; }
 
-  g_w = width; g_h = height; g_fps = fps;
+  g_w = width; g_h = height; g_streamFps = fps;
 
   char pipelineDesc[1024];
   snprintf(pipelineDesc, sizeof(pipelineDesc),
@@ -69,8 +69,8 @@ void streamingPushFrame(const cv::Mat &bgr) {
   memcpy(map.data, src->data, size);
   gst_buffer_unmap(buffer, &map);
 
-  GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(g_frameCount, GST_SECOND, g_fps);
-  GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND, g_fps);
+  GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(g_frameCount, GST_SECOND, g_streamFps);
+  GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND, g_streamFps);
   g_frameCount++;
 
   GstFlowReturn ret;
