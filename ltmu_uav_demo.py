@@ -124,7 +124,18 @@ def main():
     roi_selected = False
 
     window_name = "LTMU — uav-dataset (Python PoC)"
-    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    except cv2.error as e:
+        if "not implemented" in str(e) or "GTK" in str(e):
+            print("\nERROR: OpenCV built without GTK+ support (needed for windows).")
+            print("On Jetson, run:")
+            print("  sudo apt install libgtk2.0-dev pkg-config")
+            print("  pip install opencv-contrib-python --force-reinstall")
+            print("  python3 ltmu_uav_demo.py")
+            return 1
+        else:
+            raise
 
     print("[MAIN] SPACE=play/pause  c=select ROI  r=reset  q=quit")
 
