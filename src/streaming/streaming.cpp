@@ -15,7 +15,7 @@
 #include "../tracker/tracker_thread.h"
 
 #ifndef LTMU_ENCODER_ELEMENT
-#define LTMU_ENCODER_ELEMENT "x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000"
+#define LTMU_ENCODER_ELEMENT "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=4000"
 #endif
 
 // nvv4l2h264enc (Jetson hardware encoder) wants its input in NVMM memory;

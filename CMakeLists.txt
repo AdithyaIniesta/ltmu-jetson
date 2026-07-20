@@ -24,7 +24,7 @@ set_target_properties(${EXE_NAME} PROPERTIES
 #    software x264enc default. ─────────────────────────────────────────
 target_compile_definitions(${EXE_NAME} PRIVATE
   LTMU_ECON_CAMERAS
-  LTMU_ENCODER_ELEMENT="nvv4l2h264enc maxperf-enable=1 insert-sps-pps=1 bitrate=8000000"
+  LTMU_ENCODER_ELEMENT="nvv4l2h264enc maxperf-enable=1 insert-sps-pps=1 iframeinterval=30 idrinterval=30 bitrate=8000000"
 )
 
 target_include_directories(${EXE_NAME} PRIVATE
