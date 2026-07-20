@@ -71,35 +71,6 @@ class SimpleTracker:
         self.initialized = False
 
 
-class ROIDrawer:
-    """Mouse-based ROI selection (click-drag-release)."""
-    def __init__(self):
-        self.drawing = False
-        self.start = None
-        self.roi = None
-
-    def on_mouse(self, event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.drawing = True
-            self.start = (x, y)
-        elif event == cv2.EVENT_MOUSEMOVE:
-            if self.drawing:
-                pass  # just track, we'll draw on update
-        elif event == cv2.EVENT_LBUTTONUP:
-            if self.drawing and self.start:
-                x1, y1 = self.start
-                x2, y2 = x, y
-                if x2 < x1:
-                    x1, x2 = x2, x1
-                if y2 < y1:
-                    y1, y2 = y2, y1
-                w, h = x2 - x1, y2 - y1
-                if w > 4 and h > 4:
-                    self.roi = (x1, y1, w, h)
-            self.drawing = False
-            self.start = None
-
-
 class SequencePlayer:
     """Paced image sequence playback."""
     def __init__(self, seq_dir, fps=30):
@@ -151,12 +122,11 @@ def main():
     # Init tracker
     tracker = SimpleTracker()
     roi_selected = False
-    drawer = ROIDrawer()
 
     window_name = "LTMU — uav-dataset (Python PoC)"
+    mouse_enabled = False
     try:
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-        cv2.setMouseCallback(window_name, drawer.on_mouse)
     except cv2.error as e:
         if "not implemented" in str(e) or "GTK" in str(e):
             print("\nERROR: OpenCV built without GTK+ support (needed for windows).")
@@ -168,13 +138,14 @@ def main():
         else:
             raise
 
-    print("[MAIN] SPACE=play/pause  click-drag ROI  r=reset  q=quit")
+    print("[MAIN] SPACE=play/pause  SPACE again to pause, then drag ROI  r=reset  q=quit")
 
     while True:
         frame, fid = player.get_current()
         if frame is None:
             print("[MAIN] sequence exhausted")
             break
+
 
         display = frame.copy()
 
@@ -193,7 +164,7 @@ def main():
 
         # HUD
         status = "PAUSED" if player.paused else "PLAY"
-        hud = f"{status}  |  SPACE play/pause   drag ROI   r: reset   q: quit"
+        hud = f"{status}  |  SPACE play/pause   c: manual ROI (x,y,w,h)   r: reset   q: quit"
         cv2.putText(display, hud, (10, display.shape[0] - 12),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
@@ -202,22 +173,28 @@ def main():
 
         if key == ord(' '):
             player.toggle_pause()
+        elif key == ord('c') or key == ord('C'):
+            if player.paused:
+                try:
+                    x = int(input("  x: "))
+                    y = int(input("  y: "))
+                    w = int(input("  w: "))
+                    h = int(input("  h: "))
+                    roi = (x, y, w, h)
+                    if tracker.init(frame, roi):
+                        print(f"[MAIN] CAPTURE @ ({x}, {y}, {w}, {h})")
+                        roi_selected = True
+                except:
+                    print("[MAIN] invalid input")
+            else:
+                print("[MAIN] pause first (SPACE), then press c")
         elif key == ord('r') or key == ord('R'):
             tracker.reset()
             roi_selected = False
-            drawer.roi = None
             print("[MAIN] RESET")
         elif key == ord('q') or key == ord('Q') or key == 27:  # ESC
             print("[MAIN] quit")
             break
-
-        # Check if a ROI was drawn and apply it
-        if drawer.roi is not None:
-            roi = drawer.roi
-            if tracker.init(frame, roi):
-                print(f"[MAIN] CAPTURE @ ({roi[0]}, {roi[1]}, {roi[2]}, {roi[3]})")
-                roi_selected = True
-            drawer.roi = None  # consume it
 
         player.advance()
 
