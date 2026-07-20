@@ -42,6 +42,13 @@ void datasetCaptureThread(const DatasetCaptureConfig &cfg, RingBuffer &ring,
   size_t idx = 0;
 
   while (g_running.load()) {
+    // Local-display pause: hold the current frame (don't advance or
+    // re-push) so the viewer can draw an ROI on a still image. No effect
+    // in the stream-to-GUI path, where g_paused is never set.
+    if (g_paused.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
     auto t0 = std::chrono::steady_clock::now();
     cv::Mat img = cv::imread(frames[idx]);
     if (!img.empty()) {

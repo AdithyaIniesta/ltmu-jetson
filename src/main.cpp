@@ -46,9 +46,11 @@
 #include "telemetry/telemetry.h"
 #include "tracker/embedder_onnx.h"
 #include "tracker/tracker_thread.h"
+#include "viewer/local_viewer.h"
 
 // ── Global definitions (declared extern in globals.h) ──────────
 std::atomic<bool> g_running{true};
+std::atomic<bool> g_paused{false};
 std::atomic<int> g_selected_camera{0};
 std::atomic<bool> g_handoff_requested{false};
 std::atomic<int> g_target_confirmed{0};
@@ -200,6 +202,18 @@ int main(int argc, char *argv[]) {
                   recEnabled, g_tracker_W, g_tracker_H, g_fps);
 
   printf(LOG_GREEN "[MAIN]" LOG_RESET " all threads started — waiting for CAPTURE\n");
+
+  // Local-display mode (LTMU_LOCAL_DISPLAY=1, set by run_jp5.sh): drive an
+  // on-Jetson OpenCV window on the main thread — SPACE play/pause, draw the
+  // ROI with the mouse, watch the overlay — no ground-station GUI needed.
+  // The stream/control/telemetry threads keep running harmlessly; the
+  // viewer just feeds CAPTURE through the same g_pendingInitL slot. When
+  // it returns (operator pressed q) g_running is already cleared, so the
+  // worker threads below wind down exactly as they do on SIGINT.
+  const char *localDisplay = getenv("LTMU_LOCAL_DISPLAY");
+  if (localDisplay && localDisplay[0] == '1') {
+    localViewerLoop(leftRing);
+  }
 
   capL.join();
   capR.join();

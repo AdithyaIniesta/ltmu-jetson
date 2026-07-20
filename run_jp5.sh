@@ -31,6 +31,20 @@ ask() {
 }
 
 echo "=== LTMU tracker — uav-dataset branch ==="
+echo
+echo "Display mode:"
+echo "  local  on-Jetson OpenCV window — SPACE play/pause, draw ROI with the"
+echo "         mouse, watch the tracker overlay. No ground-station GUI needed."
+echo "  gui    stream H.264 to the ground-station GUI and take CAPTURE over UDP"
+echo "         (same as econ-cameras)."
+ask DISPLAY_MODE  "Display mode (local/gui)"     "local"
+case "$DISPLAY_MODE" in
+  local) export LTMU_LOCAL_DISPLAY=1 ;;
+  gui)   export LTMU_LOCAL_DISPLAY=0 ;;
+  *) echo "warning: unrecognised display mode '$DISPLAY_MODE', using local"; export LTMU_LOCAL_DISPLAY=1 ;;
+esac
+echo
+
 ask CLIENT_IP     "Ground station IP"           "192.168.0.20"
 ask LEFT_VPORT    "Left video port"             "5000"
 ask LEFT_CPORT    "Left ctrl/telem port"        "5001"

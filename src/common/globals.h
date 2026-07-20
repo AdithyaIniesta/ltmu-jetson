@@ -34,6 +34,11 @@
 // ── Process lifetime ─────────────────────────────────────────
 extern std::atomic<bool> g_running;
 
+// Local-display mode only (uav-dataset): SPACE toggles this to freeze the
+// paced dataset sequence so the operator can draw an ROI on a still frame.
+// Ignored entirely in the stream-to-GUI path. See src/viewer/local_viewer.h.
+extern std::atomic<bool> g_paused;
+
 // ── Camera selection / handoff ──────────────────────────────────
 // Dual-lock: BOTH cameras may track simultaneously. g_selected_camera is
 // the "primary" — which camera's result drives UART (single physical
