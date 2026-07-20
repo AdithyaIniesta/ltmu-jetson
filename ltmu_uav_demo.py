@@ -52,15 +52,14 @@ class ROISelector:
         self.frame = frame.copy()
         self.drawing = False
         self.start = None
+        self.current = None
         self.roi = None
-        self.done = False
 
     def on_mouse(self, event, x, y, flags, param):
+        self.current = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
             self.drawing = True
             self.start = (x, y)
-        elif event == cv2.EVENT_MOUSEMOVE and self.drawing and self.start:
-            pass
         elif event == cv2.EVENT_LBUTTONUP and self.drawing and self.start:
             self.drawing = False
             x1, y1 = self.start
@@ -70,23 +69,23 @@ class ROISelector:
             w, h = x2 - x1, y2 - y1
             if w > 4 and h > 4:
                 self.roi = (x1, y1, w, h)
-            self.done = True
 
     def show(self):
         """Show window and wait for ROI selection."""
-        cv2.namedWindow("Select ROI (click-drag), ENTER to confirm", cv2.WINDOW_AUTOSIZE)
-        cv2.setMouseCallback("Select ROI (click-drag), ENTER to confirm", self.on_mouse)
+        win = "Select ROI: click-drag, SPACE to confirm, q to cancel"
+        cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(win, self.on_mouse)
 
         while True:
             display = self.frame.copy()
-            if self.drawing and self.start:
-                cv2.rectangle(display, self.start, (cv2.getMousePos()[0], cv2.getMousePos()[1]), (0, 255, 0), 2)
+            if self.drawing and self.start and self.current:
+                cv2.rectangle(display, self.start, self.current, (0, 255, 0), 2)
             if self.roi:
                 x, y, w, h = self.roi
-                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 220, 0), 2)
-            cv2.putText(display, "Click-drag to select, SPACE to confirm, q to cancel", (10, 30),
+                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 220, 0), 3)
+            cv2.putText(display, "Click-drag, SPACE confirm, q cancel", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.imshow("Select ROI (click-drag), ENTER to confirm", display)
+            cv2.imshow(win, display)
 
             key = cv2.waitKey(30) & 0xFF
             if key == ord(' ') and self.roi:
@@ -95,7 +94,7 @@ class ROISelector:
                 self.roi = None
                 break
 
-        cv2.destroyWindow("Select ROI (click-drag), ENTER to confirm")
+        cv2.destroyWindow(win)
         return self.roi
 
 
