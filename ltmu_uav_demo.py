@@ -1,98 +1,122 @@
 #!/usr/bin/env python3
-"""
-LTMU UAV dataset local demo — Python PoC.
-
-Read a sequence of images, display in OpenCV:
-  SPACE  play / pause
-  c      draw the target ROI (drag box, press ENTER)
-  r      reset (drop the lock)
-  q/ESC  quit
-
-Runs ONNX embedder tracking on locked target. Draw the tracker bbox overlay live.
-"""
+"""LTMU UAV dataset demo — click-drag to select target, SPACE play/pause, q quit."""
 import cv2
 import glob
 import os
 import sys
-import numpy as np
-from pathlib import Path
 
-# Try to import onnxruntime; fall back to CPU-only if CUDA unavailable
 try:
     import onnxruntime as ort
 except ImportError:
-    print("ERROR: onnxruntime not installed. On Jetson:")
-    print("  pip install onnxruntime")
+    print("ERROR: pip install onnxruntime")
     sys.exit(1)
 
 try:
-    import torch
-    import torchvision
+    import torch, torchvision
 except ImportError:
-    print("ERROR: torch/torchvision not installed. On Jetson:")
-    print("  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu")
+    print("ERROR: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu")
     sys.exit(1)
 
 
 class SimpleTracker:
-    """Minimal CSRT-like tracker using OpenCV."""
     def __init__(self):
         self.tracker = None
         self.initialized = False
 
     def init(self, frame, bbox):
-        """Init tracker with a frame and bounding box."""
         try:
             self.tracker = cv2.TrackerCSRT_create()
             self.tracker.init(frame, tuple(bbox))
             self.initialized = True
             return True
         except:
-            print("[TRACK] failed to init tracker")
+            print("[TRACK] failed to init")
             return False
 
     def update(self, frame):
-        """Update tracker, return (success, bbox)."""
         if not self.initialized or self.tracker is None:
             return False, None
         try:
             ok, bbox = self.tracker.update(frame)
-            if ok:
-                x, y, w, h = bbox
-                return True, (int(x), int(y), int(w), int(h))
-            else:
-                return False, None
+            return (True, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))) if ok else (False, None)
         except:
             return False, None
 
     def reset(self):
-        """Drop the lock."""
         self.tracker = None
         self.initialized = False
 
 
+class ROISelector:
+    def __init__(self, frame):
+        self.frame = frame.copy()
+        self.drawing = False
+        self.start = None
+        self.roi = None
+        self.done = False
+
+    def on_mouse(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.drawing = True
+            self.start = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and self.drawing and self.start:
+            pass
+        elif event == cv2.EVENT_LBUTTONUP and self.drawing and self.start:
+            self.drawing = False
+            x1, y1 = self.start
+            x2, y2 = x, y
+            if x2 < x1: x1, x2 = x2, x1
+            if y2 < y1: y1, y2 = y2, y1
+            w, h = x2 - x1, y2 - y1
+            if w > 4 and h > 4:
+                self.roi = (x1, y1, w, h)
+            self.done = True
+
+    def show(self):
+        """Show window and wait for ROI selection."""
+        cv2.namedWindow("Select ROI (click-drag), ENTER to confirm", cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback("Select ROI (click-drag), ENTER to confirm", self.on_mouse)
+
+        while True:
+            display = self.frame.copy()
+            if self.drawing and self.start:
+                cv2.rectangle(display, self.start, (cv2.getMousePos()[0], cv2.getMousePos()[1]), (0, 255, 0), 2)
+            if self.roi:
+                x, y, w, h = self.roi
+                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 220, 0), 2)
+            cv2.putText(display, "Click-drag to select, SPACE to confirm, q to cancel", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.imshow("Select ROI (click-drag), ENTER to confirm", display)
+
+            key = cv2.waitKey(30) & 0xFF
+            if key == ord(' ') and self.roi:
+                break
+            if key == ord('q') or key == 27:
+                self.roi = None
+                break
+
+        cv2.destroyWindow("Select ROI (click-drag), ENTER to confirm")
+        return self.roi
+
+
 class SequencePlayer:
-    """Paced image sequence playback."""
     def __init__(self, seq_dir, fps=30):
         self.frames = sorted(glob.glob(os.path.join(seq_dir, "*.jpg"))) + \
                       sorted(glob.glob(os.path.join(seq_dir, "*.jpeg"))) + \
                       sorted(glob.glob(os.path.join(seq_dir, "*.png")))
         if not self.frames:
-            raise ValueError(f"No images found in {seq_dir}")
-        print(f"[SEQ] loaded {len(self.frames)} frames from {seq_dir}")
-
+            raise ValueError(f"No images in {seq_dir}")
+        print(f"[SEQ] {len(self.frames)} frames from {seq_dir}")
         self.fps = fps
         self.frame_period_ms = int(1000 / fps)
         self.idx = 0
         self.paused = False
 
     def get_current(self):
-        """Return current frame and index."""
         img = cv2.imread(self.frames[self.idx])
         return img, self.idx
 
     def advance(self):
-        """Move to next frame (loop)."""
         if not self.paused:
             self.idx = (self.idx + 1) % len(self.frames)
 
@@ -100,106 +124,63 @@ class SequencePlayer:
         self.paused = not self.paused
         print(f"[SEQ] {'paused' if self.paused else 'playing'}")
 
-    def reset(self):
-        self.idx = 0
-
 
 def main():
-    if len(sys.argv) < 2:
-        seq_dir = "/home/nvidia/Downloads/Dataset_UAV123/UAV123/data_seq/UAV123/bike1"
-        print(f"[MAIN] usage: {sys.argv[0]} <sequence_dir>")
-        print(f"[MAIN] using default: {seq_dir}")
-    else:
-        seq_dir = sys.argv[1]
+    seq_dir = sys.argv[1] if len(sys.argv) > 1 else "/home/nvidia/Downloads/Dataset_UAV123/UAV123/data_seq/UAV123/bike1"
 
-    # Load sequence
     try:
         player = SequencePlayer(seq_dir, fps=30)
     except ValueError as e:
         print(f"ERROR: {e}")
         return 1
 
-    # Init tracker
     tracker = SimpleTracker()
-    roi_selected = False
+    window = "LTMU — uav-dataset"
+    cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
 
-    window_name = "LTMU — uav-dataset (Python PoC)"
-    mouse_enabled = False
-    try:
-        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-    except cv2.error as e:
-        if "not implemented" in str(e) or "GTK" in str(e):
-            print("\nERROR: OpenCV built without GTK+ support (needed for windows).")
-            print("On Jetson, run:")
-            print("  sudo apt install libgtk2.0-dev pkg-config")
-            print("  pip install opencv-contrib-python --force-reinstall")
-            print("  python3 ltmu_uav_demo.py")
-            return 1
-        else:
-            raise
-
-    print("[MAIN] SPACE=play/pause  SPACE again to pause, then drag ROI  r=reset  q=quit")
+    print("[MAIN] SPACE play/pause   c: select ROI   r: reset   q: quit")
 
     while True:
         frame, fid = player.get_current()
         if frame is None:
-            print("[MAIN] sequence exhausted")
             break
-
 
         display = frame.copy()
 
-        # Draw tracker result if locked
+        # Draw tracker
         if tracker.initialized:
             ok, bbox = tracker.update(frame)
-            if ok and bbox is not None:
+            if ok and bbox:
                 x, y, w, h = bbox
                 cv2.rectangle(display, (x, y), (x+w, y+h), (0, 220, 0), 2)
-                cv2.putText(display, "TRACKING", (x, max(0, y-6)),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 0), 2)
-                roi_selected = True
+                cv2.putText(display, "TRACKING", (x, max(0, y-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 0), 2)
             else:
-                cv2.putText(display, "LOST", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+                cv2.putText(display, "LOST", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
 
-        # HUD
         status = "PAUSED" if player.paused else "PLAY"
-        hud = f"{status}  |  SPACE play/pause   c: manual ROI (x,y,w,h)   r: reset   q: quit"
-        cv2.putText(display, hud, (10, display.shape[0] - 12),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(display, f"{status} | SPACE play/pause  c: select ROI  r: reset  q: quit",
+                   (10, display.shape[0]-12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
 
-        cv2.imshow(window_name, display)
+        cv2.imshow(window, display)
         key = cv2.waitKey(player.frame_period_ms) & 0xFF
 
         if key == ord(' '):
             player.toggle_pause()
         elif key == ord('c') or key == ord('C'):
-            if player.paused:
-                try:
-                    x = int(input("  x: "))
-                    y = int(input("  y: "))
-                    w = int(input("  w: "))
-                    h = int(input("  h: "))
-                    roi = (x, y, w, h)
-                    if tracker.init(frame, roi):
-                        print(f"[MAIN] CAPTURE @ ({x}, {y}, {w}, {h})")
-                        roi_selected = True
-                except:
-                    print("[MAIN] invalid input")
-            else:
-                print("[MAIN] pause first (SPACE), then press c")
+            selector = ROISelector(frame)
+            roi = selector.show()
+            if roi and tracker.init(frame, roi):
+                print(f"[MAIN] CAPTURE @ {roi}")
         elif key == ord('r') or key == ord('R'):
             tracker.reset()
-            roi_selected = False
             print("[MAIN] RESET")
-        elif key == ord('q') or key == ord('Q') or key == 27:  # ESC
+        elif key == ord('q') or key == ord('Q') or key == 27:
             print("[MAIN] quit")
             break
 
         player.advance()
 
     cv2.destroyAllWindows()
-    print("[MAIN] clean shutdown")
     return 0
 
 
