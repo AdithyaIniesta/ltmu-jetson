@@ -124,8 +124,36 @@ class SequencePlayer:
         print(f"[SEQ] {'paused' if self.paused else 'playing'}")
 
 
+def select_sequence():
+    """Show menu of available sequences."""
+    base = "/home/nvidia/Downloads/Dataset_UAV123/UAV123/data_seq/UAV123"
+    if not os.path.isdir(base):
+        print(f"ERROR: {base} not found")
+        return None
+
+    seqs = [d for d in sorted(os.listdir(base)) if os.path.isdir(os.path.join(base, d))]
+    if not seqs:
+        print(f"ERROR: no sequences in {base}")
+        return None
+
+    print("\nAvailable sequences:")
+    for i, seq in enumerate(seqs, 1):
+        print(f"  [{i}] {seq}")
+
+    while True:
+        try:
+            choice = int(input("\nSelect [1-{}]: ".format(len(seqs))))
+            if 1 <= choice <= len(seqs):
+                return os.path.join(base, seqs[choice-1])
+        except:
+            pass
+        print(f"Invalid choice, try again")
+
+
 def main():
-    seq_dir = sys.argv[1] if len(sys.argv) > 1 else "/home/nvidia/Downloads/Dataset_UAV123/UAV123/data_seq/UAV123/bike1"
+    seq_dir = sys.argv[1] if len(sys.argv) > 1 else select_sequence()
+    if not seq_dir:
+        return 1
 
     try:
         player = SequencePlayer(seq_dir, fps=30)
